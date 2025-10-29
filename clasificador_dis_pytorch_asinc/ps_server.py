@@ -96,7 +96,7 @@ class Cifar10CNN(nn.Module):
 class ParameterServer:
     def __init__(self, host: str, port: int, num_workers: int,
                  epochs: int, steps_per_epoch: int, lr: float,
-                 ssp_bound: int, quorum: Optional[int] = None):
+                 ssp_bound: int, quorum: int ):
         self.host = host
         self.port = port
         self.num_workers = num_workers
@@ -106,13 +106,8 @@ class ParameterServer:
 
         # SSP
         self.ssp_bound = max(0, int(ssp_bound))
-        default_quorum = self.num_workers - self.ssp_bound
-        if quorum is None:
-            self.quorum = max(1, min(self.num_workers, default_quorum))
-        else:
-            self.quorum = max(1, min(self.num_workers, int(quorum)))
-        if self.quorum > self.num_workers:
-            self.quorum = self.num_workers
+        self.quorum = max(1, int(quorum))
+       
 
         # Modelo y optimizador
         self.device = torch.device("cpu")
@@ -513,9 +508,9 @@ def main():
     parser.add_argument("--num-workers", type=int, required=True)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=1e-3)
-    parser.add_argument("--ssp-bound", type=int, default=1,
+    parser.add_argument("--ssp-bound", type=int, default=3,
                         help="Máxima distancia permitida entre el step global y el mínimo step de los workers (SSP). 0 = totalmente síncrono.")
-    parser.add_argument("--quorum", type=int, default=None,
+    parser.add_argument("--quorum", type=int, default=3,
                         help="Número mínimo de contribuciones para aplicar un update. Por defecto = num_workers - ssp_bound (min 1).")
     batch_size=128
     args = parser.parse_args()
