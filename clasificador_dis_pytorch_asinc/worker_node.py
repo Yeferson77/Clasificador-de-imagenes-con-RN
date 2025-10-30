@@ -1,9 +1,3 @@
-"""
-
-Ejecución (ejemplo con 2 workers):
-    python worker_node.py --server-host <IP_DEL_PS> --server-port 5000 --rank 0 --world-size 2 --batch-size 128
-    python worker_node.py --server-host <IP_DEL_PS> --server-port 5000 --rank 1 --world-size 2 --batch-size 128
-"""
 
 import argparse
 import io
@@ -248,7 +242,7 @@ def main():
     parser.add_argument("--server-host", type=str, default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=5000)
     parser.add_argument("--rank", type=int, required=True)
-    parser.add_argument("--world-size", type=int, required=True)
+    parser.add_argument("--world-size", type=int,  default=3)
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--device", type=str, default=None,
                         help="Forzar dispositivo, e.g., 'cuda' o 'cpu'. Por defecto: cuda si disponible.")
@@ -268,3 +262,4 @@ if __name__ == "__main__":
     main()
     
     
+# python worker_node.py --rank 1 
