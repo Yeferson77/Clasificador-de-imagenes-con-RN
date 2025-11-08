@@ -1,3 +1,4 @@
+# uso :solo ejecutar
 import argparse
 import socket
 import struct
@@ -601,4 +602,4 @@ def main():
 if __name__ == "__main__":
     main()
 
-# uso :solo ejecutar
+
