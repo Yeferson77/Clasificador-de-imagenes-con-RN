@@ -65,7 +65,8 @@ def extract_subset_imagenet(tar_path, output_dir, subset_percentage=0.05):
 
 if __name__ == "__main__":
     # Ajusta estas rutas según tu configuración
-    TAR_PATH = "../clasificador_dis_pytorch_asinc_v3_imagenet/data/imagenet/ILSVRC2012_img_train.tar"  # archivo original
-    OUTPUT_DIR = "../clasificador_dis_pytorch_asinc_v3_imagenet/data/imagenet"  # donde se extraerá el subset
+    TAR_PATH = "../data/imagenet/ILSVRC2012_img_train.tar"  # archivo original
+    OUTPUT_DIR = "./data/imagenet"  # donde se extraerá el subset
     
+
     extract_subset_imagenet(TAR_PATH, OUTPUT_DIR, subset_percentage=0.05)
