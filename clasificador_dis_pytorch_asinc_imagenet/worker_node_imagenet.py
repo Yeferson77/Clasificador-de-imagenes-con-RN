@@ -1,7 +1,7 @@
 """
-Ejecución :
-    python worker_node_imagenet.py  --rank 0 
-    python worker_node_imagenet.py  --rank 1 
+Ejecución (ejemplo con 2 workers):
+    python worker_node_imagenet.py --server-host 127.0.0.1 --server-port 5000 --rank 0 --world-size 2
+    python worker_node_imagenet.py --server-host 127.0.0.1 --server-port 5000 --rank 1 --world-size 2
 """
 import argparse
 import pickle
