@@ -1,4 +1,3 @@
-# uso :solo ejecutar
 import argparse
 import socket
 import struct
@@ -572,10 +571,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--num-workers", type=int, default=3)
-    parser.add_argument("--epochs", type=int, default=5)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--batch-size", type=int, default=64,
+    parser.add_argument("--batch-size", type=int, default=32,
                         help="Tamaño del lote que el PS enviará a los workers (224x224 es pesado por red)")
     parser.add_argument("--quorum", type=int, default=2,
                         help="Nº mínimo de contribuciones para actualizar el modelo")
@@ -601,5 +600,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
