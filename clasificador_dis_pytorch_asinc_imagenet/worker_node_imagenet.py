@@ -51,7 +51,7 @@ def recv_obj(sock: socket.socket) -> Any:
 # Modelo CNN (igual al PS)
 # ---------------------------
 
-class Cifar10CNN(nn.Module):
+class RN_Imagenet(nn.Module):
     def __init__(self, num_classes: int = 1000):
         super().__init__()
         self.features = nn.Sequential(
@@ -69,20 +69,20 @@ class Cifar10CNN(nn.Module):
             nn.MaxPool2d(2),
 
             nn.Dropout(0.5),
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.Conv2d(128, 512, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
         )
         self.gap = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(128, 256),
+              nn.Flatten(),
+            nn.Linear(512, 1024),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(256, 128),
+            nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(128, num_classes)
+            nn.Linear(512, num_classes)
         )
 
     def forward(self, x):
@@ -119,7 +119,7 @@ def run_worker(server_host: str, server_port: int, rank: int, world_size: int, d
     server_step = int(cfg["step"])
 
     # Modelo / criterio
-    model = Cifar10CNN(num_classes=num_classes).to(device)
+    model = RN_Imagenet(num_classes=num_classes).to(device)
     state_dict_cpu = cfg["state_dict"]
     model.load_state_dict({k: v.to(device) for k, v in state_dict_cpu.items()})
     criterion = nn.CrossEntropyLoss()
