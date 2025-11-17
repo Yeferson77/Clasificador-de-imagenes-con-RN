@@ -77,20 +77,20 @@ class Cifar10CNN(nn.Module):
             nn.MaxPool2d(2),  # 56 -> 28
             nn.Dropout(0.5),
 
-            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.Conv2d(128, 512, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),  # 28 -> 14
         )
         self.gap = nn.AdaptiveAvgPool2d((1, 1))  # -> (C,1,1)
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(128, 256),
+            nn.Linear(512, 1024),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(256, 128),
+            nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(128, num_classes)
+            nn.Linear(512, num_classes)
         )
 
     def forward(self, x):
@@ -572,8 +572,8 @@ def main():
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
     parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--epochs", type=int, default=30)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--lr", type=float, default=4e-4)
     parser.add_argument("--batch-size", type=int, default=32,
                         help="Tamaño del lote que el PS enviará a los workers (224x224 es pesado por red)")
     parser.add_argument("--quorum", type=int, default=2,
