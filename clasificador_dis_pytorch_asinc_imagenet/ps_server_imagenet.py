@@ -55,7 +55,7 @@ def recv_obj(sock: socket.socket) -> Any:
 # Modelo CNN (input-size agnóstico con AdaptiveAvgPool2d)
 # ---------------------------
 
-class Cifar10CNN(nn.Module):
+class RN_Imagenet(nn.Module):
     """CNN simple ajustada para ImageNet (1k clases) sin forzar 32x32.
        Usa AdaptiveAvgPool2d para soportar entradas 224x224 (pipeline estándar de ImageNet).
     """
@@ -158,7 +158,7 @@ class ParameterServer:
         self.num_classes = len(getattr(self.train_set, 'classes', [])) or 1000
 
         # Modelo / optimizador
-        self.model = Cifar10CNN(num_classes=self.num_classes).to(self.device)
+        self.model = RN_Imagenet(num_classes=self.num_classes).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
 
         # Orden de parámetros (para alinear gradientes)
