@@ -1,10 +1,11 @@
-
 import argparse
 import socket
 import struct
 import threading
 import pickle
 import time
+import os
+import json
 from typing import List, Dict, Any, Tuple, Optional
 
 import torch
@@ -53,59 +54,94 @@ def recv_obj(sock: socket.socket) -> Any:
 
 
 # ---------------------------
-# Modelo CNN para CIFAR-10
+# Modelo CNN para ImageNet
 # ---------------------------
 
-class Cifar10CNN(nn.Module):
-    """Red neuronal convolucional simple para clasificar CIFAR-10."""
-    def __init__(self, num_classes: int = 10):
+class RN_Imagenet(nn.Module):
+    """Red neuronal convolucional simple para clasificar ImageNet-1k."""
+    def __init__(self, num_classes: int = 1000):
         super().__init__()
         self.features = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, padding=1),
+            nn.Conv2d(3, 32, kernel_size=3, padding=1),# 3x224x224 -> 32x224x224
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
 
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),# 32x112x112 -> 64x112x112
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
 
-            nn.Dropout(0.5)
+            nn.Dropout(0.5),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),# 64x56x56 -> 128x56x56
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Dropout(0.5),
+            nn.Conv2d(128, 512, kernel_size=3, padding=1),# 128x28x28 -> 512x28x28
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
         )
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, 256),
+            nn.Linear(512, 1024),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(256, 100),
+            nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(100, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, num_classes)
+            nn.Linear(512, num_classes)
         )
 
     def forward(self, x):
         x = self.features(x)
+        x = self.gap(x)
         return self.classifier(x)
 
 
 # -------------------------------------------
-# Servidor de parámetros
+# Servidor de parámetros (entrenamiento síncrono)
 # -------------------------------------------
 
 class ParameterServer:
     def __init__(self, host: str, port: int, num_workers: int,
-                 epochs: int, steps_per_epoch: int, lr: float):
+                 epochs: int, steps_per_epoch: int, lr: float,
+                 imagenet_root: str = "./data/imagenet"):
         self.host = host
         self.port = port
         self.num_workers = num_workers
         self.epochs = epochs
         self.steps_per_epoch = steps_per_epoch
         self.lr = lr
+        self.imagenet_root = imagenet_root
+
+        # Dispositivo
+        self.device = torch.device("cpu")
+
+        # Dataset de validación ImageNet (val) para evaluar
+        self.transform_test = T.Compose([
+            T.Resize(256),
+            T.CenterCrop(224),
+            T.ToTensor(),
+            T.Normalize(mean=(0.485, 0.456, 0.406),
+                        std=(0.229, 0.224, 0.225)),
+        ])
+        try:
+            self.test_set = torchvision.datasets.ImageNet(
+                root=self.imagenet_root,
+                split="val",
+                transform=self.transform_test
+            )
+        except (RuntimeError, FileNotFoundError) as e:
+            raise RuntimeError(
+                "No se encontró el dataset ImageNet en 'imagenet_root'. "
+                "Estructura esperada: <root>/train y <root>/val con subcarpetas por clase. "
+                f"Detalle: {e}"
+            )
+
+        self.num_classes = len(getattr(self.test_set, 'classes', [])) or 1000
 
         # Modelo y optimizador
-        self.device = torch.device("cpu")
-        self.model = Cifar10CNN().to(self.device)
+        self.model = RN_Imagenet(num_classes=self.num_classes).to(self.device)
         self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
 
         # Lista de parámetros en orden
@@ -170,7 +206,7 @@ class ParameterServer:
                 # Esperar mensaje del worker
                 msg = recv_obj(conn)
                 mtype = msg.get("type")
-                
+
                 # Manejo de registro
                 if mtype == "register":
                     rank = msg["rank"]
@@ -191,25 +227,26 @@ class ParameterServer:
                         "rank": rank,
                         "lr": self.lr,
                         "step": self.global_step,
+                        "num_classes": self.num_classes,
                         "state_dict": {k: v.cpu() for k, v in self.model.state_dict().items()},
                     }
                     send_obj(conn, cfg)
-                
+
                 # Manejo de gradientes recibidos
                 elif mtype == "gradients":
                     worker_rank = msg["worker"]
                     step = msg["step"]
                     batch_size = int(msg["batch_size"])
                     grads_list = msg["grads"]
-                    
+
                     # Validaciones y agregación de gradientes
                     with self.lock:
-                        
+
                         # Marca tiempo de inicio de entrenamiento
                         if self._t0_train is None:
                             self._t0_train = time.perf_counter()
                             self._epoch_start_t = self._t0_train
-                            
+
                         # Ignorar si ya terminó el entrenamiento
                         if self.train_finished or self.global_step >= self.total_steps:
                             send_obj(conn, {"type": "stop"})
@@ -226,7 +263,7 @@ class ParameterServer:
                             }
                             send_obj(conn, resync)
                             continue
-                        
+
                         # Ignorar si el worker ya contribuyó en esta ronda
                         if worker_rank in self.contributors:
                             continue
@@ -237,7 +274,7 @@ class ParameterServer:
                         self.agg_samples += batch_size
                         self.waiting_socks.append(conn)
                         self.contributors.add(worker_rank)
-                        
+
                         # Si todos los workers contribuyeron, actualizar modelo
                         if len(self.contributors) == self.num_workers:
                             # Todos los workers enviaron gradientes
@@ -253,12 +290,11 @@ class ParameterServer:
                             self.global_step += 1
 
                             print(f"[PS] UPDATE aplicado. Global step {self.global_step}/{self.total_steps}")
-                            
+
                             # Enviar actualización o stop a todos los workers
                             state_cpu = {k: v.cpu() for k, v in self.model.state_dict().items()}
                             training_done = self.global_step >= self.total_steps
-                            
-                             
+
                             for s in self.waiting_socks:
                                 if training_done:
                                     send_obj(s, {"type": "stop"})
@@ -266,7 +302,7 @@ class ParameterServer:
                                     send_obj(s, {"type": "update",
                                                  "state_dict": state_cpu,
                                                  "step": self.global_step})
-                            
+
                             # Resetear estado de agregación
                             self.reset_aggregation_state()
 
@@ -305,7 +341,7 @@ class ParameterServer:
         finally:
             try:
                 conn.close()
-            except:
+            except Exception:
                 pass
 
     # --------- RAM (sistema y proceso) ----------
@@ -331,7 +367,7 @@ class ParameterServer:
             except Exception:
                 pass
         return out
-    
+
     # Evaluación por-época en hilo separado
     def _eval_epoch_snapshot(self, state_dict_cpu: Dict[str, torch.Tensor], epoch_idx: int):
         acc = self._evaluate_on_test_with_state(state_dict_cpu)
@@ -354,19 +390,15 @@ class ParameterServer:
                    f"({ram.get('ram_percent','N/A')}%) | "
                    f"RAM(proc): {ram.get('proc_rss_gb','N/A')} GB")
 
-        print(f"[PS] Epoch {epoch_idx}: Accuracy test = {acc:.2f}% | "
+        print(f"[PS] Epoch {epoch_idx}: Accuracy val (ImageNet) = {acc:.2f}% | "
               f"Tiempo = {et_str} | {ram_str}")
-    
+
     # Evaluación final segura
     def _evaluate_on_test_with_state(self, state_dict_cpu: Dict[str, torch.Tensor]) -> float:
         self.model.load_state_dict({k: v.to(self.device) for k, v in state_dict_cpu.items()})
-        transform = T.Compose([
-            T.ToTensor(),
-            T.Normalize(mean=(0.4914, 0.4822, 0.4465),
-                        std=(0.2470, 0.2435, 0.2616)),
-        ])
-        test_set = torchvision.datasets.CIFAR10(root="./data", train=False, download=True, transform=transform)
-        test_loader = torch.utils.data.DataLoader(test_set, batch_size=256, shuffle=False, num_workers=2)
+        test_loader = torch.utils.data.DataLoader(
+            self.test_set, batch_size=256, shuffle=False, num_workers=4
+        )
 
         self.model.eval()
         correct = 0
@@ -379,11 +411,11 @@ class ParameterServer:
                 correct += (pred == y).sum().item()
                 total += y.numel()
 
-        return 100.0 * correct / total
-    
-    # Evaluación final y resumen robusto
+        return 100.0 * correct / max(total, 1)
+
+    # Evaluación final y resumen robusto (incluye JSON en ./informes)
     def evaluate_and_report(self):
-        """Evaluación final del modelo + resumen robusto con join y lectura segura."""
+        """Evaluación final del modelo + resumen robusto con join y escritura a JSON."""
         if self.evaluated:
             return
         self.evaluated = True
@@ -403,17 +435,21 @@ class ParameterServer:
             print("\n========== RESUMEN FINAL ==========")
             print(f"Workers utilizados: {self.num_workers}")
             print(f"Épocas totales: {self.epochs}")
+            print(f"Steps por época: {self.steps_per_epoch}")
+            print(f"Steps totales (planificados): {self.total_steps}")
             print(f"Tiempo total de entrenamiento: {total_time:.3f} s")
             print(f"Tiempo promedio por step: {avg_step_time * 1000:.2f} ms")
-            print(f"Accuracy final (test): {acc_final:.2f}%\n")
+            print(f"Accuracy final val (ImageNet): {acc_final:.2f}%\n")
 
             print("---- Métricas por época ----")
+            epoch_metrics: List[Dict[str, Any]] = []
             with self.lock:
                 total_epochs = max(len(self._epoch_times), len(self._epoch_accs), len(self._epoch_ram))
                 for i in range(1, total_epochs + 1):
-                    tsec = self._epoch_times[i - 1] if i - 1 < len(self._epoch_times) else None
-                    acc_ep = self._epoch_accs[i - 1] if i - 1 < len(self._epoch_accs) else None
-                    ram = self._epoch_ram[i - 1] if i - 1 < len(self._epoch_ram) else {}
+                    idx = i - 1
+                    tsec = self._epoch_times[idx] if idx < len(self._epoch_times) else None
+                    acc_ep = self._epoch_accs[idx] if idx < len(self._epoch_accs) else None
+                    ram = self._epoch_ram[idx] if idx < len(self._epoch_ram) else {}
 
                     tsec_str = f"{tsec:.3f}s" if tsec is not None else "N/A"
                     acc_str = f"{acc_ep:.2f}%" if (acc_ep is not None) else "N/A"
@@ -422,6 +458,13 @@ class ParameterServer:
                                f"RAM(proc): {ram.get('proc_rss_gb','N/A')} GB") if ram else "RAM: N/A"
 
                     print(f"Época {i:02d}: Tiempo = {tsec_str} | Accuracy = {acc_str} | {ram_str}")
+
+                    epoch_metrics.append({
+                        "epoch": i,
+                        "time_seconds": tsec,
+                        "accuracy": acc_ep,
+                        "ram": ram,
+                    })
 
             # ---- Tasa de convergencia segura ----
             conv_rates = []
@@ -440,6 +483,31 @@ class ParameterServer:
                     print(f"Época {ep:02d}: Δacc = {delta:+.2f} pts | Δ% = {rel:+.2f}%")
             print("====================================\n")
 
+            # ---- Guardar resumen en JSON en carpeta 'informes' ----
+            resumen_json = {
+                "workers": self.num_workers,
+                "epochs": self.epochs,
+                "steps_per_epoch": self.steps_per_epoch,
+                "total_steps_planned": self.total_steps,
+                "global_steps_executed": self.global_step,
+                "total_training_time_seconds": total_time,
+                "avg_step_time_seconds": avg_step_time,
+                "final_val_accuracy": acc_final,
+                "epoch_metrics": epoch_metrics,
+            }
+
+            try:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                informes_dir = os.path.join(script_dir, "informes")
+                os.makedirs(informes_dir, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                json_path = os.path.join(informes_dir, f"reporte_final_imagenet_sync_{timestamp}.json")
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(resumen_json, f, ensure_ascii=False, indent=4)
+                print(f"[PS] Resumen final guardado en JSON: {json_path}")
+            except Exception as e:
+                print(f"[PS] Error guardando resumen JSON en 'informes': {e}")
+
 
 # ---------------------------
 # Main
@@ -449,19 +517,26 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--num-workers", type=int, required=True)
-    parser.add_argument("--epochs", type=int, default=5)
-    parser.add_argument("--lr", type=float, default=1e-3)
-    batch_size=128
+    parser.add_argument("--num-workers", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--lr", type=float, default=4e-4)
+    parser.add_argument("--imagenet-root", type=str, default="../clasificador_dis_pytorch_asinc_imagenet/data/imagenet",
+                        help="Ruta a la raíz que contiene los splits 'train' y 'val' de ILSVRC2012")
+    batch_size = 32
     args = parser.parse_args()
+
+    # Tamaño aproximado del split de entrenamiento de ImageNet-1k
+    imagenet_train_size = 1281167 * 0.15  # Usando 3% del dataset completo
+    steps_per_epoch = math.floor((imagenet_train_size / args.num_workers) / batch_size)
 
     ps = ParameterServer(
         host=args.host,
         port=args.port,
         num_workers=args.num_workers,
         epochs=args.epochs,
-        steps_per_epoch=math.floor((50000/args.num_workers)/batch_size),
-        lr=args.lr
+        steps_per_epoch=steps_per_epoch,
+        lr=args.lr,
+        imagenet_root=args.imagenet_root,
     )
     ps.start()
 
@@ -469,6 +544,5 @@ def main():
 if __name__ == "__main__":
     main()
 
-
-#comando para ejecutar: python ps_server.py --host 127.0.0.1 --port 5000 --num-workers 2 --epochs 5  --lr 0.001
-#comando para ejecutar: python ps_server.py   --num-workers 2
+# Ejemplo:
+# python ps_server.py --host 127.0.0.1 --port 5000 --num-workers 2 --epochs 5 --lr 0.001 --imagenet-root ./data/imagenet
