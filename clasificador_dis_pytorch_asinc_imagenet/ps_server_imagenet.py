@@ -4,6 +4,8 @@ import struct
 import threading
 import pickle
 import time
+import os
+import json
 from typing import List, Dict, Any, Tuple, Optional
 
 import math
@@ -285,6 +287,25 @@ class ParameterServer:
         if self._t0_train and self._t_end_train:
             total_time = self._t_end_train - self._t0_train
             avg_step_time = total_time / max(self.global_step, 1)
+
+            # Construir métricas por época para impresión y JSON
+            epoch_metrics = []
+            with self.lock:
+                total_epochs = max(len(self._epoch_times), len(self._epoch_accs), len(self._epoch_ram))
+                for i in range(1, total_epochs + 1):
+                    idx = i - 1
+                    tsec = self._epoch_times[idx] if idx < len(self._epoch_times) else None
+                    acc_ep = self._epoch_accs[idx] if idx < len(self._epoch_accs) else None
+                    ram = self._epoch_ram[idx] if idx < len(self._epoch_ram) else {}
+
+                    epoch_metrics.append({
+                        "epoch": i,
+                        "time_seconds": tsec if tsec is not None else None,
+                        "accuracy": acc_ep if acc_ep is not None else None,
+                        "ram": ram,
+                    })
+
+            # Imprimir resumen por consola (como antes)
             print("\n========== RESUMEN FINAL ==========")
             print(f"Workers utilizados: {self.num_workers}")
             print(f"Épocas totales: {self.epochs}")
@@ -294,19 +315,40 @@ class ParameterServer:
             print(f"Accuracy final val (ImageNet): {acc_final:.2f}%\n")
 
             print("---- Métricas por época ----")
-            with self.lock:
-                total_epochs = max(len(self._epoch_times), len(self._epoch_accs), len(self._epoch_ram))
-                for i in range(1, total_epochs + 1):
-                    tsec = self._epoch_times[i - 1] if i - 1 < len(self._epoch_times) else None
-                    acc_ep = self._epoch_accs[i - 1] if i - 1 < len(self._epoch_accs) else None
-                    ram = self._epoch_ram[i - 1] if i - 1 < len(self._epoch_ram) else {}
-                    tsec_str = f"{tsec:.3f}s" if tsec is not None else "N/A"
-                    acc_str = f"{acc_ep:.2f}%" if (acc_ep is not None) else "N/A"
-                    ram_str = (f"RAM(sys): {ram.get('ram_used_gb','N/A')}/{ram.get('ram_total_gb','N/A')} GB "
-                               f"({ram.get('ram_percent','N/A')}%) | "
-                               f"RAM(proc): {ram.get('proc_rss_gb','N/A')} GB") if ram else "RAM: N/A"
-                    print(f"Época {i:02d}: Tiempo = {tsec_str} | Accuracy = {acc_str} | {ram_str}")
+            for m in epoch_metrics:
+                tsec = m["time_seconds"]
+                acc_ep = m["accuracy"]
+                ram = m["ram"] or {}
+                tsec_str = f"{tsec:.3f}s" if tsec is not None else "N/A"
+                acc_str = f"{acc_ep:.2f}%" if (acc_ep is not None) else "N/A"
+                ram_str = (f"RAM(sys): {ram.get('ram_used_gb','N/A')}/{ram.get('ram_total_gb','N/A')} GB "
+                           f"({ram.get('ram_percent','N/A')}%) | "
+                           f"RAM(proc): {ram.get('proc_rss_gb','N/A')} GB") if ram else "RAM: N/A"
+                print(f"Época {m['epoch']:02d}: Tiempo = {tsec_str} | Accuracy = {acc_str} | {ram_str}")
             print("====================================\n")
+
+            # Construir JSON y guardarlo en carpeta Informes
+            resumen_json = {
+                "workers": self.num_workers,
+                "epochs": self.epochs,
+                "global_steps": self.global_step,
+                "total_training_time_seconds": total_time,
+                "avg_step_time_seconds": avg_step_time,
+                "final_val_accuracy": acc_final,
+                "epoch_metrics": epoch_metrics,
+            }
+
+            try:
+                script_dir = os.path.dirname(os.path.abspath(__file__))
+                informes_dir = os.path.join(script_dir, "informes")
+                os.makedirs(informes_dir, exist_ok=True)
+                timestamp = time.strftime("%Y%m%d_%H%M%S")
+                json_path = os.path.join(informes_dir, f"reporte_final_imagenet_{timestamp}.json")
+                with open(json_path, "w", encoding="utf-8") as f:
+                    json.dump(resumen_json, f, ensure_ascii=False, indent=4)
+                print(f"[PS] Resumen final guardado en JSON: {json_path}")
+            except Exception as e:
+                print(f"[PS] Error guardando resumen JSON en 'Informes': {e}")
 
     # ---------- Utilidad SSP: purgar aportes irrecuperables ----------
     def _purge_stale_pending(self):
@@ -571,16 +613,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--num-workers", type=int, default=2)
-    parser.add_argument("--epochs", type=int, default=10)
+    parser.add_argument("--num-workers", type=int, default=3)
+    parser.add_argument("--epochs", type=int, default=20)
     parser.add_argument("--lr", type=float, default=4e-4)
-    parser.add_argument("--batch-size", type=int, default=32,
+    parser.add_argument("--batch-size", type=int, default=8,
                         help="Tamaño del lote que el PS enviará a los workers (224x224 es pesado por red)")
     parser.add_argument("--quorum", type=int, default=2,
                         help="Nº mínimo de contribuciones para actualizar el modelo")
     parser.add_argument("--ssp-bound", type=int, default=2,
                         help="Máxima obsolescencia permitida (en steps) para aceptar una contribución")
-    parser.add_argument("--imagenet-root", type=str, default="./data/imagenet",
+    parser.add_argument("--imagenet-root", type=str, default="C:\Yeferson\Cursos\Cliente-Servidor\Dataset\data\imagenet",
                         help="Ruta a la raíz que contiene los splits 'train' y 'val' de ILSVRC2012")
     args = parser.parse_args()
 
