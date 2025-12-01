@@ -1,8 +1,7 @@
 """
-
 Ejecución (ejemplo con 2 workers):
-    python worker_node.py --server-host <IP_DEL_PS> --server-port 5000 --rank 0 --world-size 2 --batch-size 128
-    python worker_node.py --server-host <IP_DEL_PS> --server-port 5000 --rank 1 --world-size 2 --batch-size 128
+    python worker_node.py --server-host <IP_DEL_PS> --server-port 5000 --rank 0 --world-size 2 --batch-size 128 --imagenet-root ./data/imagenet
+    python worker_node.py --server-host <IP_DEL_PS> --server-port 5000 --rank 1 --world-size 2 --batch-size 128 --imagenet-root ./data/imagenet
 """
 
 import argparse
@@ -16,7 +15,7 @@ import psutil
 import torch
 import torch.nn as nn
 
-import torch.optim as optim
+import torch.optim as optim  # no se usa directamente, pero se deja por compatibilidad
 from torch.utils.data import DataLoader, DistributedSampler
 
 import torchvision
@@ -57,8 +56,8 @@ def recv_obj(sock: socket.socket) -> Any:
 # Modelo CNN (debe coincidir con el PS)
 # ---------------------------
 
-class Cifar10CNN(nn.Module):
-    def __init__(self, num_classes: int = 10):
+class RN_Imagenet(nn.Module):
+    def __init__(self, num_classes: int = 1000):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(3, 32, kernel_size=3, padding=1),
@@ -69,44 +68,63 @@ class Cifar10CNN(nn.Module):
             nn.ReLU(inplace=True),
             nn.MaxPool2d(2),
 
-            nn.Dropout(0.5)
+            nn.Dropout(0.5),
+            nn.Conv2d(64, 128, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
+
+            nn.Dropout(0.5),
+            nn.Conv2d(128, 512, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(2),
         )
+        self.gap = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(64 * 8 * 8, 256),
+            nn.Linear(512, 1024),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(256, 100),
+            nn.Linear(1024, 512),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(100, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, num_classes)
+            nn.Linear(512, num_classes)
         )
 
     def forward(self, x):
         x = self.features(x)
+        x = self.gap(x)
         return self.classifier(x)
 
 
 # ---------------------------
-# Data loader con partición
+# Data loader con partición (ImageNet)
 # ---------------------------
 
-def build_dataloader(rank: int, world_size: int, batch_size: int) -> Tuple[DataLoader, DistributedSampler]:
+def build_dataloader(rank: int, world_size: int, batch_size: int,
+                     imagenet_root: str) -> Tuple[DataLoader, DistributedSampler]:
     """
-    Crea DataLoader para CIFAR-10 (train) usando DistributedSampler para particionar
+    Crea DataLoader para ImageNet (train) usando DistributedSampler para particionar
     el dataset entre workers (por rank/world_size). Cada epoch el sampler baraja de forma consistente.
     """
     transform = T.Compose([
+        T.RandomResizedCrop(224, scale=(0.08, 1.0), ratio=(3/4, 4/3)),
+        T.RandomHorizontalFlip(),
         T.ToTensor(),
-        T.Normalize(mean=(0.4914, 0.4822, 0.4465),
-                    std=(0.2470, 0.2435, 0.2616)),
+        T.Normalize(mean=(0.485, 0.456, 0.406),
+                    std=(0.229, 0.224, 0.225)),
     ])
 
-    train_set = torchvision.datasets.CIFAR10(root="./data", train=True, download=True, transform=transform)
-    sampler = DistributedSampler(train_set, num_replicas=world_size, rank=rank, shuffle=True, drop_last=True)
-    loader = DataLoader(train_set, batch_size=batch_size, sampler=sampler, num_workers=0, pin_memory=True)
+    train_set = torchvision.datasets.ImageNet(
+        root=imagenet_root, split="train", transform=transform
+    )
+    sampler = DistributedSampler(
+        train_set, num_replicas=world_size, rank=rank,
+        shuffle=True, drop_last=True
+    )
+    loader = DataLoader(
+        train_set, batch_size=batch_size, sampler=sampler,
+        num_workers=4, pin_memory=True
+    )
     return loader, sampler
 
 
@@ -115,7 +133,7 @@ def build_dataloader(rank: int, world_size: int, batch_size: int) -> Tuple[DataL
 # ---------------------------
 
 def run_worker(server_host: str, server_port: int, rank: int, world_size: int,
-               batch_size: int, device_str: str = None):
+               batch_size: int, imagenet_root: str, device_str: str = None):
     device = torch.device(device_str if device_str else ("cuda" if torch.cuda.is_available() else "cpu"))
     print(f"[Worker {rank}] Usando dispositivo: {device}")
 
@@ -133,22 +151,23 @@ def run_worker(server_host: str, server_port: int, rank: int, world_size: int,
     steps_per_epoch = cfg["steps_per_epoch"]
     lr = cfg["lr"]
     server_step = cfg["step"]
+    num_classes = int(cfg.get("num_classes", 1000))
 
     # Modelo / criterio
-    model = Cifar10CNN().to(device)
+    model = RN_Imagenet(num_classes=num_classes).to(device)
     # Carga de pesos iniciales desde el PS
     state_dict_cpu = cfg["state_dict"]
     model.load_state_dict({k: v.to(device) for k, v in state_dict_cpu.items()})
     criterion = nn.CrossEntropyLoss()
 
-    # Data loader particionado
-    train_loader, sampler = build_dataloader(rank, world_size, batch_size)
+    # Data loader particionado (ImageNet train)
+    train_loader, sampler = build_dataloader(rank, world_size, batch_size, imagenet_root)
     data_iter = iter(train_loader)
 
     # Bucle de entrenamiento (sin optimizer local; solo computa gradientes)
     total_steps = epochs * steps_per_epoch
     local_steps_done = 0
-    
+
     for epoch in range(epochs):
         # barajar de forma consistente el segmento de datos para este epoch
         sampler.set_epoch(epoch)
@@ -217,8 +236,7 @@ def run_worker(server_host: str, server_port: int, rank: int, world_size: int,
                 server_step = resp["step"]
                 print(f"[Worker {rank}] Resync recibido. Nuevo step={server_step}. Reintentando.")
 
-                # Retroceder el contador del step_in_epoch para volver a intentar mismo step
-                # (ajustamos con continue para repetir)
+                # Repetir el mismo step (no avanzamos step_in_epoch)
                 continue
 
             elif rtype == "stop":
@@ -243,8 +261,10 @@ def main():
     parser.add_argument("--server-host", type=str, default="127.0.0.1")
     parser.add_argument("--server-port", type=int, default=5000)
     parser.add_argument("--rank", type=int, required=True)
-    parser.add_argument("--world-size", type=int, required=True)
-    parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--world-size", type=int, default=3)
+    parser.add_argument("--batch-size", type=int, default=8)
+    parser.add_argument("--imagenet-root", type=str, default="../clasificador_dis_pytorch_asinc_imagenet/data/imagenet",
+                        help="Ruta a la raíz que contiene los splits 'train' y 'val' de ILSVRC2012")
     parser.add_argument("--device", type=str, default=None,
                         help="Forzar dispositivo, e.g., 'cuda' o 'cpu'. Por defecto: cuda si disponible.")
     args = parser.parse_args()
@@ -255,13 +275,13 @@ def main():
         rank=args.rank,
         world_size=args.world_size,
         batch_size=args.batch_size,
+        imagenet_root=args.imagenet_root,
         device_str=args.device
     )
 
 
 if __name__ == "__main__":
     main()
-    
-    
-#comando manual para ejecutar: python worker_node.py --server-host 127.0.0.1 --server-port 5000 --rank 0 --world-size 2 --batch-size 128
-#comando reducido : python worker_node.py --server-host 127.0.0.1 --server-port 5000 --rank 0 --world-size 2 --batch-size 128
+
+# comando manual ejemplo:
+# python worker_node.py --server-host 127.0.0.1 --server-port 5000 --rank 0 --world-size 2 --batch-size 128 --imagenet-root ./data/imagenet
